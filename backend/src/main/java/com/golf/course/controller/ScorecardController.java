@@ -110,6 +110,24 @@ public class ScorecardController {
         return ApiResponse.success("裁决完成，记分卡发回球员确认", scorecardService.rule(id, req));
     }
 
+    // ---------------- 管理员：补梯台/完赛日（旧数据缺参数补救） ----------------
+
+    @PostMapping("/{id}/round-meta")
+    public ApiResponse<Scorecard> bindRoundMeta(@PathVariable Long id,
+                                                @RequestParam(required = false) Long courseRatingId,
+                                                @RequestParam(required = false) String playDate) {
+        java.time.LocalDate date = null;
+        if (playDate != null && !playDate.isBlank()) {
+            try {
+                date = java.time.LocalDate.parse(playDate);
+            } catch (java.time.DateTimeException e) {
+                throw new com.golf.course.common.BizException("完赛日格式应为 yyyy-MM-dd：" + playDate);
+            }
+        }
+        return ApiResponse.success("轮次参数已补齐，请对该球员发起差点定向重算",
+                scorecardService.bindRoundMeta(id, courseRatingId, date));
+    }
+
     // ---------------- 详情 / 留痕 / 正式成绩 / 收口 ----------------
 
     @GetMapping("/{id}")

@@ -134,3 +134,23 @@ body {
 .el-button--primary:hover { background: var(--primary-deep) !important; }
 .el-tag { font-weight: 600; }
 .el-tabs__item.is-active { color: var(--primary-deep) !important; }
+
+/* ---------------- 差点指数 ---------------- */
+.hint { font-size: 12px; color: var(--muted); line-height: 1.6; margin-top: 10px;
+  background: #f4faf8; border-left: 3px solid var(--primary); padding: 8px 12px; border-radius: 4px; }
+.form-hint { font-size: 12px; color: var(--muted); margin-left: 10px; }
+.fail-table { margin-top: 12px; }
+
+.hc-detail { padding: 0 8px 20px; }
+.hc-top { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.hc-card { flex: 1 1 160px; background: #f4faf8; border: 1px solid #d6f0ea; border-radius: 10px; padding: 12px 14px; }
+.hc-card-wide { flex: 2 1 260px; }
+.hc-k { font-size: 12px; color: var(--primary-soft); }
+.hc-v { font-size: 26px; font-weight: 800; color: var(--primary-deep); margin: 4px 0 2px; }
+.hc-rule { font-size: 16px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hc-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.hc-alert { margin-bottom: 14px; }
+.hc-section-title { font-weight: 700; color: var(--primary-deep); margin: 16px 0 8px; font-size: 14px; }
+.hc-actions { margin: 12px 0; display: flex; gap: 10px; }
+.hc-hist { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.hc-rule-name { color: var(--muted); font-size: 12px; }

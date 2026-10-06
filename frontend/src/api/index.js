@@ -82,5 +82,24 @@ export default {
   ruleScorecard: (id, d) => call(http.post(`/scorecards/${id}/rule`, d)),
   scorecardEvents: (id) => call(http.get(`/scorecards/${id}/events`)),
   officialResults: (tournamentId) => call(http.get('/scorecards/official', params({ tournamentId }))),
-  signoffCheck: (tournamentId) => call(http.get('/scorecards/signoff-check', params({ tournamentId })))
+  signoffCheck: (tournamentId) => call(http.get('/scorecards/signoff-check', params({ tournamentId }))),
+  bindRoundMeta: (id, payload) => call(http.post(`/scorecards/${id}/round-meta`, null, params(payload))),
+
+  // ---------------- 差点指数 ----------------
+  handicapProfile: (playerId) => call(http.get(`/handicap/players/${playerId}/profile`)),
+  handicapHistory: (playerId) => call(http.get(`/handicap/players/${playerId}/history`)),
+  fullRecalc: (p) => call(http.post('/handicap/recalc/full', null, params(p || {}))),
+  targetRecalc: (p) => call(http.post('/handicap/recalc/target', null, params(p || {}))),
+  listRecalcBatches: () => call(http.get('/handicap/recalc-batches')),
+  getRecalcBatch: (id) => call(http.get(`/handicap/recalc-batches/${id}`)),
+
+  // ---------------- 差点规则 / 梯台（管理员） ----------------
+  listRatings: () => call(http.get('/handicap/admin/ratings')),
+  createRating: (d) => call(http.post('/handicap/admin/ratings', d)),
+  updateRating: (id, d) => call(http.put(`/handicap/admin/ratings/${id}`, d)),
+  listRules: () => call(http.get('/handicap/admin/rules')),
+  createRule: (d) => call(http.post('/handicap/admin/rules', d)),
+  updateRule: (id, d) => call(http.put(`/handicap/admin/rules/${id}`, d)),
+  toggleRule: (id, enabled) =>
+    call(http.post(`/handicap/admin/rules/${id}/toggle`, null, params({ enabled })))
 }

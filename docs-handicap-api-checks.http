@@ -1,0 +1,80 @@
+### 差点指数重算功能接口自测（口径见 docs-handicap-index.md）
+###
+### 种子数据覆盖：
+###   林浩(P-001) 5 轮（含 10/04 跨 v2 规则轮）→ 已出指数
+###   王启明(P-003) 3 轮（含 09/13 异常高杆被排除）→ 已出指数
+###   陈雨桐(P-002) 2 轮（08/15 + 09/21 缺梯台）→ 样本不足
+###   黄诗韵(P-010) 1 轮（09/20 缺梯台）→ 样本不足
+@host=http://localhost:8080
+@api={{host}}/api
+
+### 1. 球员差点画像：当前指数 / 最近变化 / 采用与排除轮次 / 规则
+GET {{api}}/handicap/players/1/profile
+
+### 2. 王启明：异常轮（46 杆）应出现在排除轮次中，原因「单轮差值异常…」
+GET {{api}}/handicap/players/3/profile
+
+### 3. 陈雨桐：样本不足；missingRounds 里有 09/21 缺梯台轮
+GET {{api}}/handicap/players/2/profile
+
+### 4. 含已作废旧链的全量历史
+GET {{api}}/handicap/players/1/history
+
+### 5. 管理员：规则列表（v1/v2 两条，生效日不同）
+GET {{api}}/handicap/admin/rules
+
+### 6. 管理员：梯台列表
+GET {{api}}/handicap/admin/ratings
+
+### 7. 新建未来生效规则（已生效规则不可改，只能新建）
+POST {{api}}/handicap/admin/rules
+Content-Type: application/json
+
+{
+  "code": "WHS-V3",
+  "name": "俱乐部差点规则 v3（示例）",
+  "effectiveDate": "2027-01-01",
+  "windowRounds": 20,
+  "minRounds": 3,
+  "countTableJson": "{\"3\":1,\"4\":1,\"5\":2,\"6\":2,\"7\":3,\"8\":4,\"9\":4,\"10\":5,\"11\":5,\"12\":6,\"13\":6,\"14\":7,\"15\":7,\"16\":8,\"17\":8,\"18\":9,\"19\":9,\"20\":10}",
+  "maxDiffBelowIndex": 7.0,
+  "maxDecreasePerRound": 2.0,
+  "holeScoreCap": 7,
+  "indexMin": -10.0,
+  "indexMax": 54.0,
+  "note": "接口自测"
+}
+
+### 8. 已生效规则必须被锁定（期望 400）
+PUT {{api}}/handicap/admin/rules/1
+Content-Type: application/json
+
+{ "code": "WHS-V1", "name": "hack", "effectiveDate": "2026-01-01",
+  "windowRounds": 20, "minRounds": 3,
+  "countTableJson": "{\"3\":1,\"20\":10}",
+  "maxDiffBelowIndex": 10.0, "maxDecreasePerRound": 5.0, "holeScoreCap": null,
+  "indexMin": -10.0, "indexMax": 54.0 }
+
+### 9. 给陈雨桐的缺参数卡 14 补绑「练习场9洞·白梯」(id=3)
+POST {{api}}/scorecards/14/round-meta?courseRatingId=3
+
+### 10. 对陈雨桐定向重算（补参数后由缺项→可算）
+POST {{api}}/handicap/recalc/target?playerId=2
+
+### 11. 按梯台定向重算（所有绑该梯台的球员）
+POST {{api}}/handicap/recalc/target?ratingId=4
+
+### 12. 全量重算（按赛事日期分批，留空=全量）
+POST {{api}}/handicap/recalc/full?from=2026-09-01&to=2026-09-30
+
+### 13. 批次列表
+GET {{api}}/handicap/recalc-batches
+
+### 14. 批次详情（把 1 换成实际批次 id；含失败明细）
+GET {{api}}/handicap/recalc-batches/1
+
+### 15. 直接改球员指数字段必须被忽略（返回体 handicapIndex 不应变成 99）
+PUT {{api}}/players/1
+Content-Type: application/json
+
+{ "handicapIndex": 99.0, "indexStatus": "CALCULATED", "note": "尝试只改指数数字" }

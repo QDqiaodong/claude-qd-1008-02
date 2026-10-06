@@ -34,6 +34,7 @@ import com.golf.course.entity.ScorecardEvent;
 import com.golf.course.entity.ScorecardHole;
 import com.golf.course.entity.Tournament;
 import com.golf.course.entity.TournamentEntry;
+import com.golf.course.repository.CourseRatingRepository;
 import com.golf.course.repository.HoleRepository;
 import com.golf.course.repository.PlayerRepository;
 import com.golf.course.repository.ScorecardEventRepository;
@@ -70,6 +71,8 @@ public class ScorecardService {
     private final HoleRepository holeRepository;
     private final TournamentEntryRepository entryRepository;
     private final ObjectMapper objectMapper;
+    private final HandicapService handicapService;
+    private final CourseRatingRepository ratingRepository;
 
     public ScorecardService(ScorecardRepository cardRepository,
                             ScorecardHoleRepository holeLineRepository,
@@ -78,7 +81,9 @@ public class ScorecardService {
                             PlayerRepository playerRepository,
                             HoleRepository holeRepository,
                             TournamentEntryRepository entryRepository,
-                            ObjectMapper objectMapper) {
+                            ObjectMapper objectMapper,
+                            HandicapService handicapService,
+                            CourseRatingRepository ratingRepository) {
         this.cardRepository = cardRepository;
         this.holeLineRepository = holeLineRepository;
         this.eventRepository = eventRepository;
@@ -87,6 +92,8 @@ public class ScorecardService {
         this.holeRepository = holeRepository;
         this.entryRepository = entryRepository;
         this.objectMapper = objectMapper;
+        this.handicapService = handicapService;
+        this.ratingRepository = ratingRepository;
     }
 
     // ================================================================
@@ -163,6 +170,9 @@ public class ScorecardService {
                     card.setRoundNo(roundNo);
                     card.setStatus(Dict.CARD_DRAFT);
                     card.setExpectedHoles(openHoles().size());
+                    // 默认带出赛事梯台（记分员可改）；为空时签核后该轮会被标「难度参数缺失」
+                    card.setCourseRating(tournament.getCourseRating());
+                    card.setPlayDate(tournament.getStartDate());
                     card.setCreatedAt(LocalDateTime.now());
                     card.setUpdatedAt(LocalDateTime.now());
                     return cardRepository.save(card);
@@ -273,6 +283,10 @@ public class ScorecardService {
         String beforeJson = card.getSnapshotJson(); // 草稿首次提交为 null（之前从未固化）
         card.setExpectedHoles(open.size());
         card.setTotalStrokes(total);
+        // 完赛日缺省取赛事开始日；差点计算只认 play_date <= 计算截止日的已签核轮
+        if (card.getPlayDate() == null) {
+            card.setPlayDate(tournament.getStartDate());
+        }
         card.setSnapshotJson(toJson(new Snapshot(card.getRoundNo(), total, snapshotHoles)));
         card.setStatus(Dict.CARD_PENDING);
         card.setSubmittedAt(LocalDateTime.now());
@@ -316,6 +330,10 @@ public class ScorecardService {
                 "球员整卡确认，记分卡正式签核",
                 Dict.CARD_PENDING, Dict.CARD_SIGNED,
                 req.expectedVersion(), saved.getVersion(), beforeJson, saved.getSnapshotJson());
+
+        // 签核即成为「已完成比赛」：同步派生差点轮次并在球员链上追加一个计算节点。
+        // 与确认同事务——确认回滚则差点也不变化。
+        handicapService.onSignedOff(saved);
         return getView(id);
     }
 
@@ -462,6 +480,30 @@ public class ScorecardService {
                 Dict.CARD_DISPUTED, Dict.CARD_PENDING,
                 req.expectedVersion(), saved.getVersion(), beforeJson, afterJson);
         return getView(id);
+    }
+
+    // ================================================================
+    // 管理员：给（旧）记分卡补绑梯台/完赛日 —— 补齐后可定向重算差点
+    // ================================================================
+
+    /**
+     * 管理员给记分卡补梯台与完赛日。已签核卡也允许补（旧数据缺球场难度参数的唯一补救入口）：
+     * 只更新参数，不触碰固化快照与签核状态；差点指数需随后发起「定向重算」才变化，
+     * 重算以 SUPERSEDED 旧链 + 追加新链方式留痕，历史口径不会被静默改写。
+     */
+    @Transactional
+    public Scorecard bindRoundMeta(Long id, Long courseRatingId, java.time.LocalDate playDate) {
+        Scorecard card = getCard(id);
+        if (courseRatingId != null) {
+            com.golf.course.entity.CourseRating rating = ratingRepository.findById(courseRatingId)
+                    .orElseThrow(() -> new BizException("梯台不存在：" + courseRatingId));
+            card.setCourseRating(rating);
+        }
+        if (playDate != null) {
+            card.setPlayDate(playDate);
+        }
+        card.setUpdatedAt(LocalDateTime.now());
+        return cardRepository.saveAndFlush(card);
     }
 
     // ================================================================

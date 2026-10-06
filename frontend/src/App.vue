@@ -8,10 +8,11 @@ import TeeTimeView from './views/TeeTimeView.vue'
 import PlayerView from './views/PlayerView.vue'
 import TournamentView from './views/TournamentView.vue'
 import ScorecardView from './views/ScorecardView.vue'
+import HandicapView from './views/HandicapView.vue'
 
 // ------------------------------------------------------------------
 // 导航形态：左侧 SVG 球场平面图。球洞 / 开球台 / 球员会馆 / 赛事中心
-// / 记分卡签核处 是可点击热点，点击切换右侧业务模块（即改变 hash 路由）。
+// / 记分卡签核处 / 差点指数台 是可点击热点，点击切换右侧业务模块（即改变 hash 路由）。
 // 注意：main.js 未 app.use(router)，所以这里直接读 router.currentRoute.value。
 // ------------------------------------------------------------------
 
@@ -20,7 +21,8 @@ const viewMap = {
   '/teetime': TeeTimeView,
   '/players': PlayerView,
   '/tournament': TournamentView,
-  '/scorecard': ScorecardView
+  '/scorecard': ScorecardView,
+  '/handicap': HandicapView
 }
 
 const hotspots = [
@@ -28,25 +30,27 @@ const hotspots = [
   { path: '/teetime',    label: '开球台',     x: 158, y: 58,  sub: '预订·时段' },
   { path: '/players',    label: '球员会馆',   x: 242, y: 120, sub: '差点·名册' },
   { path: '/tournament', label: '赛事中心',   x: 150, y: 268, sub: '排行榜·成绩' },
-  { path: '/scorecard',  label: '记分卡签核', x: 250, y: 210, sub: '提交·确认·争议·收口' }
+  { path: '/scorecard',  label: '记分卡签核', x: 250, y: 210, sub: '提交·确认·争议·收口' },
+  { path: '/handicap',   label: '差点指数台', x: 78,  y: 205, sub: '规则·重算·留痕' }
 ]
 
 const currentPath = ref(router.currentRoute.value.path)
-const counts = ref({ holes: 0, teetime: 0, players: 0, tournament: 0, scorecard: 0 })
+const counts = ref({ holes: 0, teetime: 0, players: 0, tournament: 0, scorecard: 0, handicap: 0 })
 
 const currentView = computed(() => viewMap[currentPath.value] || HoleView)
 
 async function loadCounts() {
   try {
-    const [h, t, p, tour] = await Promise.all([
-      api.listHoles(), api.listTeeTimes(), api.listPlayers(), api.listTournaments()
+    const [h, t, p, tour, rules] = await Promise.all([
+      api.listHoles(), api.listTeeTimes(), api.listPlayers(), api.listTournaments(),
+      api.listRules().catch(() => [])
     ])
     // 记分卡热点默认统计进行中赛事的卡片数；没有进行中赛事则为 0
     const ongoing = tour.find(x => x.status === '进行中')
     const cards = ongoing ? await api.listScorecards(ongoing.id) : []
     counts.value = {
       holes: h.length, teetime: t.length, players: p.length,
-      tournament: tour.length, scorecard: cards.length
+      tournament: tour.length, scorecard: cards.length, handicap: rules.length
     }
   } catch (e) { /* 计数失败不影响主流程 */ }
 }
@@ -57,6 +61,7 @@ function countFor(path) {
   if (path === '/players') return counts.value.players
   if (path === '/tournament') return counts.value.tournament
   if (path === '/scorecard') return counts.value.scorecard
+  if (path === '/handicap') return counts.value.handicap
   return 0
 }
 

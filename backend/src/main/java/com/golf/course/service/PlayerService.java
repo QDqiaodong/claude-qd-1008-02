@@ -67,6 +67,8 @@ public class PlayerService {
             }
             player.setHandicap(input.getHandicap());
         }
+        // handicapIndex/indexStatus 等指数字段是重算服务维护的计算缓存，
+        // 页面直接改一个数字不保留任何计算依据，这里一律忽略，防止历史指数被新口径静默改写。
         if (input.getPhone() != null) {
             player.setPhone(input.getPhone());
         }

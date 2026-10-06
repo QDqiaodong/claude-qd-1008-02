@@ -1,5 +1,6 @@
 package com.golf.course.entity;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 import jakarta.persistence.Column;
@@ -74,6 +75,15 @@ public class Scorecard {
     /** 最近一次固化快照的总杆数 */
     @Column(name = "total_strokes")
     private Integer totalStrokes;
+
+    /** 本轮完赛日：差点计算只取截止日之前/当日已结束（已签核）的轮次 */
+    @Column(name = "play_date")
+    private LocalDate playDate;
+
+    /** 本轮梯台（球场难度参数）；旧数据可能为空，差点计算时该轮记「难度参数缺失」 */
+    @ManyToOne(fetch = FetchType.EAGER)
+    @JoinColumn(name = "course_rating_id")
+    private CourseRating courseRating;
 
     /** 本次已固化快照（提交 / 裁决后重写），历史快照见 scorecard_event */
     @Column(name = "snapshot_json")

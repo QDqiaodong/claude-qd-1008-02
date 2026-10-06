@@ -60,6 +60,7 @@ public class TournamentService {
         t.setEndDate(input.getEndDate());
         t.setStatus(input.getStatus());
         t.setLocation(input.getLocation());
+        t.setCourseRating(input.getCourseRating());
         t.setNote(input.getNote());
         t.setCreatedAt(LocalDateTime.now());
         return tournamentRepository.save(t);

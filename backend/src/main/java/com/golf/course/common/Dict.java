@@ -51,6 +51,41 @@ public final class Dict {
     public static final String ACTION_UPHOLD = "维持";
     public static final String ACTION_ADJUST = "修正";
 
+    // ---------------- 差点指数 ----------------
+    /** 计算日志状态 */
+    public static final String INDEX_CALCULATED = "CALCULATED";
+    public static final String INDEX_INSUFFICIENT = "INSUFFICIENT";
+    public static final String INDEX_NO_RULE = "NO_RULE";
+
+    /** 计算链 */
+    public static final String CHAIN_LIVE = "LIVE";
+    public static final String CHAIN_SUPERSEDED = "SUPERSEDED";
+
+    /** 触发方式 */
+    public static final String TRIGGER_SIGNOFF = "SIGNOFF";
+    public static final String TRIGGER_TARGET = "TARGET_RECALC";
+    public static final String TRIGGER_FULL = "FULL_RECALC";
+    public static final String TRIGGER_BOOTSTRAP = "BOOTSTRAP";
+
+    /** 批次类型 / 状态 */
+    public static final String BATCH_FULL = "FULL";
+    public static final String BATCH_TARGET = "TARGET";
+    public static final String BATCH_QUEUED = "排队中";
+    public static final String BATCH_RUNNING = "执行中";
+    public static final String BATCH_DONE = "已完成";
+    public static final String BATCH_PARTIAL = "部分失败";
+    public static final String BATCH_FAILED = "失败";
+
+    /** 轮次排除原因（同时作为页面展示文案 key） */
+    public static final String EX_RATING_MISSING = "难度参数缺失";
+    public static final String EX_ANOMALY = "单轮差值异常（高出窗口最佳差值超规则阈值，疑似录入错误）";
+    public static final String EX_RANK = "选轮排名未入选";
+    public static final String EX_INSUFFICIENT = "样本不足未出指数";
+
+    /** 坡度难度值合法区间（USGA：55 ~ 155） */
+    public static final int SLOPE_MIN = 55;
+    public static final int SLOPE_MAX = 155;
+
     // ---------------- 取值方法 ----------------
 
     public static boolean isValidHoleStatus(String status) {
