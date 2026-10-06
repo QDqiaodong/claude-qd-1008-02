@@ -1,5 +1,6 @@
 package com.golf.course.common;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 /**
@@ -51,6 +52,29 @@ public final class Dict {
     public static final String ACTION_UPHOLD = "维持";
     public static final String ACTION_ADJUST = "修正";
 
+    // ---------------- 差点指数重算 ----------------
+    /** 差点计算状态：已计算 / 样本不足（可计轮次 < 规则最少轮次） */
+    public static final String HCP_CALCULATED = "已计算";
+    public static final String HCP_INSUFFICIENT = "样本不足";
+
+    /** 批量重算批次状态 */
+    public static final String RUN_RUNNING = "进行中";
+    public static final String RUN_DONE = "已完成";
+    public static final String RUN_PARTIAL = "部分失败";
+
+    /** 差点指数上限（与 HANDICAP_MAX 对齐，下限 0） */
+    public static final BigDecimal HCP_INDEX_MAX = new BigDecimal("54.0");
+    public static final BigDecimal HCP_INDEX_MIN = BigDecimal.ZERO;
+
+    /** 标准坡度值（WHS 差值公式中的 113） */
+    public static final BigDecimal STANDARD_SLOPE = new BigDecimal("113");
+
+    /** 球场难度参数合法区间：slope 55 ~ 155（WHS）；courseRating 覆盖短场到锦标场 */
+    public static final int SLOPE_MIN = 55;
+    public static final int SLOPE_MAX = 155;
+    public static final BigDecimal RATING_MIN = new BigDecimal("20.0");
+    public static final BigDecimal RATING_MAX = new BigDecimal("80.0");
+
     // ---------------- 取值方法 ----------------
 
     public static boolean isValidHoleStatus(String status) {
@@ -74,5 +98,15 @@ public final class Dict {
     public static boolean canProgressTournament(String from, String to) {
         int i = TOURNAMENT_FLOW.indexOf(from);
         return i >= 0 && i + 1 < TOURNAMENT_FLOW.size() && TOURNAMENT_FLOW.get(i + 1).equals(to);
+    }
+
+    /** 坡度难度 slopeRating 须为 55 ~ 155 的整数（WHS 区间） */
+    public static boolean isValidSlope(Integer slope) {
+        return slope != null && slope >= SLOPE_MIN && slope <= SLOPE_MAX;
+    }
+
+    /** 球场难度值 courseRating 须落在 20.0 ~ 80.0 之间 */
+    public static boolean isValidCourseRating(BigDecimal rating) {
+        return rating != null && rating.compareTo(RATING_MIN) >= 0 && rating.compareTo(RATING_MAX) <= 0;
     }
 }

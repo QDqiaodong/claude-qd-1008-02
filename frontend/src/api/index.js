@@ -50,6 +50,7 @@ export default {
   listTournaments: () => call(http.get('/tournaments')),
   getTournament: (id) => call(http.get(`/tournaments/${id}`)),
   createTournament: (d) => call(http.post('/tournaments', d)),
+  updateTournament: (id, d) => call(http.put(`/tournaments/${id}`, d)),
   advanceTournament: (id, target) => call(http.post(`/tournaments/${id}/advance`, null, params({ target }))),
 
   // ---------------- 排行榜（乐观锁演示） ----------------
@@ -82,5 +83,19 @@ export default {
   ruleScorecard: (id, d) => call(http.post(`/scorecards/${id}/rule`, d)),
   scorecardEvents: (id) => call(http.get(`/scorecards/${id}/events`)),
   officialResults: (tournamentId) => call(http.get('/scorecards/official', params({ tournamentId }))),
-  signoffCheck: (tournamentId) => call(http.get('/scorecards/signoff-check', params({ tournamentId })))
+  signoffCheck: (tournamentId) => call(http.get('/scorecards/signoff-check', params({ tournamentId }))),
+
+  // ---------------- 差点指数重算 ----------------
+  listHandicapRules: () => call(http.get('/handicap-rules')),
+  createHandicapRule: (d) => call(http.post('/handicap-rules', d)),
+  deleteHandicapRule: (id) => call(http.delete(`/handicap-rules/${id}`)),
+  handicapSummary: () => call(http.get('/handicaps/summary')),
+  playerHandicap: (playerId) => call(http.get(`/handicaps/players/${playerId}`)),
+  playerHandicapHistory: (playerId) => call(http.get(`/handicaps/players/${playerId}/history`)),
+  missingDifficulty: () => call(http.get('/handicaps/missing-params')),
+  recalcHandicaps: (d) => call(http.post('/handicaps/recalc', d)),
+  listHandicapRuns: () => call(http.get('/handicap-runs')),
+  getHandicapRun: (id) => call(http.get(`/handicap-runs/${id}`)),
+  handicapRunErrors: (id) => call(http.get(`/handicap-runs/${id}/errors`)),
+  runHandicapRecalc: (d) => call(http.post('/handicap-runs', d))
 }

@@ -134,3 +134,8 @@ body {
 .el-button--primary:hover { background: var(--primary-deep) !important; }
 .el-tag { font-weight: 600; }
 .el-tabs__item.is-active { color: var(--primary-deep) !important; }
+
+/* ---------------- 差点指数 ---------------- */
+.delta-up { color: #d4380d; font-weight: 700; }      /* 指数上升（变差） */
+.delta-down { color: #08967a; font-weight: 700; }    /* 指数下降（变好） */
+.muted { color: var(--muted); font-size: 12px; }

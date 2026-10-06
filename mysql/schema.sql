@@ -15,6 +15,11 @@ CREATE DATABASE IF NOT EXISTS golf_course
 USE golf_course;
 
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS handicap_history_round;
+DROP TABLE IF EXISTS handicap_history;
+DROP TABLE IF EXISTS handicap_run_error;
+DROP TABLE IF EXISTS handicap_run;
+DROP TABLE IF EXISTS handicap_rule;
 DROP TABLE IF EXISTS scorecard_event;
 DROP TABLE IF EXISTS scorecard_hole;
 DROP TABLE IF EXISTS scorecard;
@@ -39,12 +44,17 @@ CREATE TABLE hole (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------- 球员 ----------------
--- handicap 差点取值范围 0 ~ 54
+-- handicap 差点取值范围 0 ~ 54（管理员手工维护的基础差点）
+-- handicap_index 为「差点指数重算」写回的当前计算指数（样本不足时为 NULL），
+-- 计算依据、采用轮次与规则快照都在 handicap_history / handicap_history_round，
+-- 绝不允许只改这一个数字而不留计算痕迹。
 CREATE TABLE player (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     player_no VARCHAR(16) NOT NULL UNIQUE,
     name VARCHAR(48) NOT NULL,
     handicap INT NOT NULL,
+    handicap_index DECIMAL(4,1),
+    handicap_index_at DATETIME,
     phone VARCHAR(24),
     note VARCHAR(64),
     created_at DATETIME
@@ -65,6 +75,8 @@ CREATE TABLE tee_time (
 
 -- ---------------- 赛事 ----------------
 -- 状态：报名中 → 进行中 → 已结束
+-- course_rating / slope_rating 为球场难度参数（差点差值计算的输入），需成对维护；
+-- 旧赛事允许为 NULL —— 涉及这些赛事的轮次在差点计算中会被明确标记为「缺球场难度参数」并排除。
 CREATE TABLE tournament (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     tournament_no VARCHAR(24) NOT NULL UNIQUE,
@@ -73,8 +85,11 @@ CREATE TABLE tournament (
     end_date DATE,
     status VARCHAR(16) NOT NULL,
     location VARCHAR(48),
+    course_rating DECIMAL(4,1),
+    slope_rating INT,
     note VARCHAR(64),
-    created_at DATETIME
+    created_at DATETIME,
+    KEY idx_tour_end_date (end_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------- 赛事排行榜（乐观锁演示实体） ----------------
@@ -136,7 +151,10 @@ CREATE TABLE scorecard (
     last_submitter VARCHAR(48),
     created_at DATETIME,
     updated_at DATETIME,
-    UNIQUE KEY uk_scorecard_tour_player_round (tournament_id, player_id, round_no)
+    UNIQUE KEY uk_scorecard_tour_player_round (tournament_id, player_id, round_no),
+    -- 差点重算按「球员 + 已签核」取轮次、按「状态 + 赛事批次」分批扫描，两个索引避免全表扫
+    KEY idx_card_player_status (player_id, status),
+    KEY idx_card_status_tour (status, tournament_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------- 记分卡逐洞明细（草稿工作区 + 争议/裁决工作数据） ----------------
@@ -178,6 +196,109 @@ CREATE TABLE scorecard_event (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- =====================================================================
+-- 球员差点指数重算
+-- =====================================================================
+
+-- ---------------- 差点计算规则（带生效日期，版本化） ----------------
+-- 同一生效日期只允许一条规则；规则一旦被任何计算 / 批次引用即不可删除，
+-- 只能新增一条更新生效日的规则 —— 历史差点因此始终按当时规则可追溯。
+-- best_count_table：「样本轮数:采用最低差值个数」映射，如 3:1,4:1,...,20:8；
+--   样本数落在两档之间时向下取最近档。
+-- max_differential：单轮差值截断上限（录入错误的异常成绩按上限计入，不再拉高指数）；
+-- max_drop：单次重算允许的最大下调幅度（防止单次暴跌失真）。
+CREATE TABLE handicap_rule (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    rule_name VARCHAR(48) NOT NULL,
+    effective_date DATE NOT NULL,
+    rounds_window INT NOT NULL,
+    min_rounds INT NOT NULL,
+    best_count_table VARCHAR(255) NOT NULL,
+    max_differential DECIMAL(4,1) NOT NULL,
+    max_drop DECIMAL(4,1) NOT NULL,
+    note VARCHAR(255),
+    created_at DATETIME,
+    UNIQUE KEY uk_rule_effective_date (effective_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 全量重算批次 ----------------
+-- 按赛事日期分批扫描已签核记分卡，逐球员重算；单个球员失败不拖垮整批，
+-- 失败明细落 handicap_run_error。
+CREATE TABLE handicap_run (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    run_no VARCHAR(24) NOT NULL UNIQUE,
+    as_of_date DATE NOT NULL,
+    rule_id BIGINT NOT NULL,
+    from_date DATE,
+    to_date DATE,
+    batch_size INT NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    total_players INT NOT NULL DEFAULT 0,
+    success_count INT NOT NULL DEFAULT 0,
+    insufficient_count INT NOT NULL DEFAULT 0,
+    fail_count INT NOT NULL DEFAULT 0,
+    triggered_by VARCHAR(48),
+    started_at DATETIME,
+    finished_at DATETIME
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 批次失败明细 ----------------
+CREATE TABLE handicap_run_error (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    run_id BIGINT NOT NULL,
+    batch_label VARCHAR(64),
+    player_id BIGINT,
+    player_name VARCHAR(48),
+    message VARCHAR(255),
+    created_at DATETIME,
+    KEY idx_runerr_run (run_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 差点指数计算历史（每次计算的完整依据） ----------------
+-- 每次重算（批量或定向）每个球员一行：用的哪条规则（rule_json 快照）、
+-- 基准日、样本量、采用个数、算出的指数、相对上次的升降、是否触发下调限制。
+-- 状态：已计算 / 样本不足（可计轮次 < 规则最少轮次，index_value 为 NULL）。
+CREATE TABLE handicap_history (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    player_id BIGINT NOT NULL,
+    run_id BIGINT,
+    rule_id BIGINT NOT NULL,
+    rule_json VARCHAR(512) NOT NULL,
+    as_of_date DATE NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    sample_size INT NOT NULL,
+    used_count INT NOT NULL DEFAULT 0,
+    index_value DECIMAL(4,1),
+    previous_index DECIMAL(4,1),
+    change_amount DECIMAL(4,1),
+    drop_limited TINYINT(1) NOT NULL DEFAULT 0,
+    missing_params TINYINT(1) NOT NULL DEFAULT 0,
+    remark VARCHAR(255),
+    created_at DATETIME,
+    KEY idx_hcp_hist_player (player_id, id),
+    KEY idx_hcp_hist_run (run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 单次计算的轮次明细（采用 / 排除及原因） ----------------
+-- 进入「最近 N 轮」窗口的每个已完成轮次一行：差值、是否被采用、
+-- 未采用的排除原因（缺球场难度参数 / 差值未进入最低 K 个 / 快照无法解析）、
+-- 以及差值是否被上限截断。
+CREATE TABLE handicap_history_round (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    history_id BIGINT NOT NULL,
+    tournament_id BIGINT NOT NULL,
+    round_no INT NOT NULL,
+    play_date DATE,
+    gross_score INT,
+    course_rating DECIMAL(4,1),
+    slope_rating INT,
+    differential DECIMAL(5,1),
+    capped TINYINT(1) NOT NULL DEFAULT 0,
+    is_used TINYINT(1) NOT NULL DEFAULT 0,
+    exclusion_reason VARCHAR(255),
+    KEY idx_hhr_history (history_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- =====================================================================
 -- 种子数据
 -- =====================================================================
 
@@ -216,9 +337,14 @@ INSERT INTO tee_time (id, play_date, player_id, slot, status, note, created_at) 
 (9,  '2026-10-03', 9,  '10:10', '可订', '待拼场',         UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 4 DAY),
 (10, '2026-10-03', 10, '15:00', '已订', '新人练习',       UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 4 DAY);
 
-INSERT INTO tournament (id, tournament_no, name, start_date, end_date, status, location, note, created_at) VALUES
-(1, 'T-2026-001', '金秋会员邀请赛', '2026-10-10', '2026-10-12', '报名中', 'A场主球场', '9 洞比杆赛',   UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 30 DAY),
-(2, 'T-2026-002', '青少年高尔夫训练营', '2026-11-01', '2026-11-03', '报名中', '练习场', '低差点组',     UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 28 DAY);
+INSERT INTO tournament (id, tournament_no, name, start_date, end_date, status, location, course_rating, slope_rating, note, created_at) VALUES
+(1, 'T-2026-001', '金秋会员邀请赛', '2026-10-10', '2026-10-12', '报名中', 'A场主球场', 28.8, 116, '9 洞比杆赛',   UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 30 DAY),
+(2, 'T-2026-002', '青少年高尔夫训练营', '2026-11-01', '2026-11-03', '报名中', '练习场', NULL, NULL, '低差点组',     UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 28 DAY),
+-- 历史已结束赛事（差点重算的轮次来源）；T-2026-005 为旧数据，未维护球场难度参数（演示缺参与定向重算）
+(3, 'T-2026-003', '春季会员杯', '2026-06-12', '2026-06-14', '已结束', 'A场主球场', 28.6, 118, NULL,               UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 120 DAY),
+(4, 'T-2026-004', '夏季公开赛', '2026-07-10', '2026-07-12', '已结束', 'A场主球场', 29.1, 122, NULL,               UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 92 DAY),
+(5, 'T-2026-005', '迎新友谊赛', '2026-08-07', '2026-08-09', '已结束', 'B场老球场', NULL, NULL, '旧数据：未维护球场难度参数', UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 64 DAY),
+(6, 'T-2026-006', '秋季排位赛', '2026-09-04', '2026-09-06', '已结束', 'A场主球场', 28.3, 115, NULL,               UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 36 DAY);
 
 INSERT INTO leaderboard (id, tournament_id, round_no, leader_name, total_score, version, updated_at) VALUES
 (1, 1, 1, '王启明', 33, 0, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 2 DAY),
@@ -248,7 +374,26 @@ INSERT INTO tournament_entry (id, tournament_id, player_id, round_count, created
 (3, 1, 3, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 DAY),
 (4, 1, 5, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 DAY),
 (5, 2, 6, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 DAY),
-(6, 2, 8, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 DAY);
+(6, 2, 8, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 3 DAY),
+-- 历史赛事参赛名单（与下方已签核记分卡一一对应）
+(7,  3, 1, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 118 DAY),
+(8,  3, 2, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 118 DAY),
+(9,  3, 3, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 118 DAY),
+(10, 3, 5, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 118 DAY),
+(11, 3, 6, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 118 DAY),
+(12, 3, 8, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 118 DAY),
+(13, 4, 1, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 90 DAY),
+(14, 4, 2, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 90 DAY),
+(15, 4, 3, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 90 DAY),
+(16, 4, 5, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 90 DAY),
+(17, 4, 6, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 90 DAY),
+(18, 4, 8, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 90 DAY),
+(19, 5, 1, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 62 DAY),
+(20, 5, 2, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 62 DAY),
+(21, 5, 4, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 62 DAY),
+(22, 6, 1, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 34 DAY),
+(23, 6, 2, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 34 DAY),
+(24, 6, 3, 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 34 DAY);
 
 -- =====================================================================
 -- 种子数据：记分卡签核闭环演示
@@ -272,6 +417,93 @@ INSERT INTO scorecard
  '{"roundNo":1,"totalStrokes":33,"holes":[{"holeNo":1,"par":4,"strokes":5},{"holeNo":2,"par":5,"strokes":6},{"holeNo":3,"par":3,"strokes":3},{"holeNo":4,"par":4,"strokes":5},{"holeNo":6,"par":3,"strokes":4},{"holeNo":7,"par":5,"strokes":5},{"holeNo":8,"par":4,"strokes":5}]}',
  UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 1 DAY, NULL, '记分员小周',
  UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 2 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 6 HOUR);
+
+-- =====================================================================
+-- 种子数据：历史已签核记分卡（差点指数重算的「已完成轮次」来源）
+--   春季会员杯(3) / 夏季公开赛(4) / 秋季排位赛(6) 已维护球场难度参数；
+--   迎新友谊赛(5) 未维护（旧数据缺参，计算时明确排除并可定向重算）。
+--   覆盖样例：球员 1/2/3 有 3 轮可计 → 出指数；球员 5/6/8 仅 2 轮、
+--   球员 4 仅缺参赛事的 1 轮 → 样本不足。
+-- =====================================================================
+INSERT INTO scorecard
+(id, tournament_id, player_id, round_no, status, version, expected_holes, total_strokes, snapshot_json,
+ submitted_at, confirmed_at, last_submitter, created_at, updated_at) VALUES
+-- 春季会员杯（2026-06-14 结束，rating 28.6 / slope 118）
+(5, 3, 1, 1, '已签核', 2, 7, 40,
+ '{"roundNo":1,"totalStrokes":40,"holes":[{"holeNo":1,"par":4,"strokes":6},{"holeNo":2,"par":5,"strokes":7},{"holeNo":3,"par":3,"strokes":4},{"holeNo":4,"par":4,"strokes":6},{"holeNo":6,"par":3,"strokes":4},{"holeNo":7,"par":5,"strokes":7},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 114 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 115 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY),
+(6, 3, 2, 1, '已签核', 2, 7, 45,
+ '{"roundNo":1,"totalStrokes":45,"holes":[{"holeNo":1,"par":4,"strokes":7},{"holeNo":2,"par":5,"strokes":8},{"holeNo":3,"par":3,"strokes":5},{"holeNo":4,"par":4,"strokes":6},{"holeNo":6,"par":3,"strokes":5},{"holeNo":7,"par":5,"strokes":8},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 114 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 115 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY),
+(7, 3, 3, 1, '已签核', 2, 7, 33,
+ '{"roundNo":1,"totalStrokes":33,"holes":[{"holeNo":1,"par":4,"strokes":5},{"holeNo":2,"par":5,"strokes":6},{"holeNo":3,"par":3,"strokes":3},{"holeNo":4,"par":4,"strokes":5},{"holeNo":6,"par":3,"strokes":3},{"holeNo":7,"par":5,"strokes":6},{"holeNo":8,"par":4,"strokes":5}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 114 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 115 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY),
+(8, 3, 5, 1, '已签核', 2, 7, 30,
+ '{"roundNo":1,"totalStrokes":30,"holes":[{"holeNo":1,"par":4,"strokes":4},{"holeNo":2,"par":5,"strokes":5},{"holeNo":3,"par":3,"strokes":3},{"holeNo":4,"par":4,"strokes":4},{"holeNo":6,"par":3,"strokes":3},{"holeNo":7,"par":5,"strokes":5},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 114 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 115 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY),
+(9, 3, 6, 1, '已签核', 2, 7, 43,
+ '{"roundNo":1,"totalStrokes":43,"holes":[{"holeNo":1,"par":4,"strokes":6},{"holeNo":2,"par":5,"strokes":7},{"holeNo":3,"par":3,"strokes":5},{"holeNo":4,"par":4,"strokes":6},{"holeNo":6,"par":3,"strokes":5},{"holeNo":7,"par":5,"strokes":8},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 114 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 115 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY),
+(10, 3, 8, 1, '已签核', 2, 7, 47,
+ '{"roundNo":1,"totalStrokes":47,"holes":[{"holeNo":1,"par":4,"strokes":7},{"holeNo":2,"par":5,"strokes":8},{"holeNo":3,"par":3,"strokes":5},{"holeNo":4,"par":4,"strokes":7},{"holeNo":6,"par":3,"strokes":5},{"holeNo":7,"par":5,"strokes":9},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 114 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 115 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 113 DAY),
+-- 夏季公开赛（2026-07-12 结束，rating 29.1 / slope 122）
+(11, 4, 1, 1, '已签核', 2, 7, 41,
+ '{"roundNo":1,"totalStrokes":41,"holes":[{"holeNo":1,"par":4,"strokes":6},{"holeNo":2,"par":5,"strokes":7},{"holeNo":3,"par":3,"strokes":5},{"holeNo":4,"par":4,"strokes":6},{"holeNo":6,"par":3,"strokes":4},{"holeNo":7,"par":5,"strokes":7},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 86 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 87 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY),
+(12, 4, 2, 1, '已签核', 2, 7, 46,
+ '{"roundNo":1,"totalStrokes":46,"holes":[{"holeNo":1,"par":4,"strokes":7},{"holeNo":2,"par":5,"strokes":8},{"holeNo":3,"par":3,"strokes":5},{"holeNo":4,"par":4,"strokes":7},{"holeNo":6,"par":3,"strokes":5},{"holeNo":7,"par":5,"strokes":8},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 86 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 87 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY),
+(13, 4, 3, 1, '已签核', 2, 7, 34,
+ '{"roundNo":1,"totalStrokes":34,"holes":[{"holeNo":1,"par":4,"strokes":5},{"holeNo":2,"par":5,"strokes":6},{"holeNo":3,"par":3,"strokes":4},{"holeNo":4,"par":4,"strokes":5},{"holeNo":6,"par":3,"strokes":3},{"holeNo":7,"par":5,"strokes":6},{"holeNo":8,"par":4,"strokes":5}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 86 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 87 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY),
+(14, 4, 5, 1, '已签核', 2, 7, 29,
+ '{"roundNo":1,"totalStrokes":29,"holes":[{"holeNo":1,"par":4,"strokes":4},{"holeNo":2,"par":5,"strokes":5},{"holeNo":3,"par":3,"strokes":3},{"holeNo":4,"par":4,"strokes":4},{"holeNo":6,"par":3,"strokes":3},{"holeNo":7,"par":5,"strokes":5},{"holeNo":8,"par":4,"strokes":5}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 86 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 87 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY),
+(15, 4, 6, 1, '已签核', 2, 7, 44,
+ '{"roundNo":1,"totalStrokes":44,"holes":[{"holeNo":1,"par":4,"strokes":6},{"holeNo":2,"par":5,"strokes":8},{"holeNo":3,"par":3,"strokes":5},{"holeNo":4,"par":4,"strokes":6},{"holeNo":6,"par":3,"strokes":5},{"holeNo":7,"par":5,"strokes":8},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 86 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 87 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY),
+(16, 4, 8, 1, '已签核', 2, 7, 48,
+ '{"roundNo":1,"totalStrokes":48,"holes":[{"holeNo":1,"par":4,"strokes":7},{"holeNo":2,"par":5,"strokes":9},{"holeNo":3,"par":3,"strokes":5},{"holeNo":4,"par":4,"strokes":7},{"holeNo":6,"par":3,"strokes":5},{"holeNo":7,"par":5,"strokes":9},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 86 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 87 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 85 DAY),
+-- 迎新友谊赛（2026-08-09 结束，旧数据：未维护球场难度参数）
+(17, 5, 1, 1, '已签核', 2, 7, 38,
+ '{"roundNo":1,"totalStrokes":38,"holes":[{"holeNo":1,"par":4,"strokes":5},{"holeNo":2,"par":5,"strokes":7},{"holeNo":3,"par":3,"strokes":4},{"holeNo":4,"par":4,"strokes":5},{"holeNo":6,"par":3,"strokes":4},{"holeNo":7,"par":5,"strokes":7},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 58 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 57 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 59 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 57 DAY),
+(18, 5, 2, 1, '已签核', 2, 7, 43,
+ '{"roundNo":1,"totalStrokes":43,"holes":[{"holeNo":1,"par":4,"strokes":6},{"holeNo":2,"par":5,"strokes":7},{"holeNo":3,"par":3,"strokes":5},{"holeNo":4,"par":4,"strokes":6},{"holeNo":6,"par":3,"strokes":5},{"holeNo":7,"par":5,"strokes":8},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 58 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 57 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 59 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 57 DAY),
+(19, 5, 4, 1, '已签核', 2, 7, 52,
+ '{"roundNo":1,"totalStrokes":52,"holes":[{"holeNo":1,"par":4,"strokes":8},{"holeNo":2,"par":5,"strokes":9},{"holeNo":3,"par":3,"strokes":6},{"holeNo":4,"par":4,"strokes":8},{"holeNo":6,"par":3,"strokes":6},{"holeNo":7,"par":5,"strokes":9},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 58 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 57 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 59 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 57 DAY),
+-- 秋季排位赛（2026-09-06 结束，rating 28.3 / slope 115）
+(20, 6, 1, 1, '已签核', 2, 7, 39,
+ '{"roundNo":1,"totalStrokes":39,"holes":[{"holeNo":1,"par":4,"strokes":6},{"holeNo":2,"par":5,"strokes":6},{"holeNo":3,"par":3,"strokes":4},{"holeNo":4,"par":4,"strokes":6},{"holeNo":6,"par":3,"strokes":4},{"holeNo":7,"par":5,"strokes":7},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 30 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 29 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 31 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 29 DAY),
+(21, 6, 2, 1, '已签核', 2, 7, 44,
+ '{"roundNo":1,"totalStrokes":44,"holes":[{"holeNo":1,"par":4,"strokes":6},{"holeNo":2,"par":5,"strokes":8},{"holeNo":3,"par":3,"strokes":5},{"holeNo":4,"par":4,"strokes":6},{"holeNo":6,"par":3,"strokes":5},{"holeNo":7,"par":5,"strokes":8},{"holeNo":8,"par":4,"strokes":6}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 30 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 29 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 31 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 29 DAY),
+(22, 6, 3, 1, '已签核', 2, 7, 32,
+ '{"roundNo":1,"totalStrokes":32,"holes":[{"holeNo":1,"par":4,"strokes":4},{"holeNo":2,"par":5,"strokes":6},{"holeNo":3,"par":3,"strokes":3},{"holeNo":4,"par":4,"strokes":5},{"holeNo":6,"par":3,"strokes":3},{"holeNo":7,"par":5,"strokes":6},{"holeNo":8,"par":4,"strokes":5}]}',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 30 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 29 DAY, '记分员小周',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 31 DAY, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 29 DAY);
 
 -- 卡1 刘振华草稿：7 洞齐全
 INSERT INTO scorecard_hole (id, scorecard_id, hole_no, par, strokes, dispute_reason, ruled_strokes, ruling_note, updated_at) VALUES
@@ -322,3 +554,15 @@ INSERT INTO scorecard_event
  '{"roundNo":1,"totalStrokes":33,"holes":[{"holeNo":1,"par":4,"strokes":5},{"holeNo":2,"par":5,"strokes":6},{"holeNo":3,"par":3,"strokes":3},{"holeNo":4,"par":4,"strokes":5},{"holeNo":6,"par":3,"strokes":4},{"holeNo":7,"par":5,"strokes":5},{"holeNo":8,"par":4,"strokes":5}]}',
  '{"roundNo":1,"totalStrokes":33,"holes":[{"holeNo":1,"par":4,"strokes":5},{"holeNo":2,"par":5,"strokes":6,"disputeReason":"同组均记为5杆，记分卡6杆系笔误"},{"holeNo":3,"par":3,"strokes":3},{"holeNo":4,"par":4,"strokes":5},{"holeNo":6,"par":3,"strokes":4},{"holeNo":7,"par":5,"strokes":5},{"holeNo":8,"par":4,"strokes":5}]}',
  UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 6 HOUR);
+
+-- =====================================================================
+-- 种子数据：默认差点计算规则（WHS 口径，2026-01-01 起生效）
+--   最近 20 轮；样本 ≥ 3 才出指数；按样本数取最低差值个数（3轮取1 … 20轮取8）；
+--   单轮差值超 40.0 按 40.0 截断；单次重算下调幅度不超过 5.0。
+-- =====================================================================
+INSERT INTO handicap_rule
+(id, rule_name, effective_date, rounds_window, min_rounds, best_count_table, max_differential, max_drop, note, created_at) VALUES
+(1, 'WHS标准口径v1', '2026-01-01', 20, 3,
+ '3:1,4:1,5:1,6:2,7:2,8:2,9:3,10:3,11:3,12:4,13:4,14:4,15:5,16:5,17:5,18:6,19:6,20:8',
+ 40.0, 5.0, '默认规则：最近20轮、样本≥3、按样本数取最低差值、单轮截断40、单次下调≤5',
+ UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 90 DAY);

@@ -40,6 +40,12 @@ public class TournamentController {
         return ApiResponse.success("赛事已创建", tournamentService.create(input));
     }
 
+    /** 维护基础信息与球场难度参数（状态仍只能走 advance 逐级推进） */
+    @PutMapping("/{id}")
+    public ApiResponse<Tournament> update(@PathVariable Long id, @RequestBody Tournament input) {
+        return ApiResponse.success("赛事已更新", tournamentService.update(id, input));
+    }
+
     /** 状态推进：报名中 → 进行中 → 已结束 */
     @PostMapping("/{id}/advance")
     public ApiResponse<Tournament> advance(@PathVariable Long id, @RequestParam String target) {

@@ -20,7 +20,33 @@ const tourDialog = ref(false)
 const savingTour = ref(false)
 const tourForm = ref(blankTour())
 function blankTour() {
-  return { tournamentNo: '', name: '', startDate: '2026-10-10', endDate: '2026-10-12', status: '报名中', location: '', note: '' }
+  return { tournamentNo: '', name: '', startDate: '2026-10-10', endDate: '2026-10-12', status: '报名中', location: '', courseRating: null, slopeRating: null, note: '' }
+}
+
+// ---- 赛事编辑（含球场难度参数补齐） ----
+const editDialog = ref(false)
+const savingEdit = ref(false)
+const editForm = ref({})
+function openEdit(t) {
+  editForm.value = {
+    id: t.id, name: t.name, startDate: t.startDate, endDate: t.endDate,
+    location: t.location, courseRating: t.courseRating, slopeRating: t.slopeRating, note: t.note
+  }
+  editDialog.value = true; error.value = ''; tip.value = ''
+}
+async function saveEdit() {
+  savingEdit.value = true; error.value = ''
+  try {
+    const d = {
+      ...editForm.value,
+      courseRating: editForm.value.courseRating === '' || editForm.value.courseRating == null ? null : Number(editForm.value.courseRating),
+      slopeRating: editForm.value.slopeRating === '' || editForm.value.slopeRating == null ? null : Number(editForm.value.slopeRating)
+    }
+    await api.updateTournament(d.id, d)
+    tip.value = `赛事「${d.name}」已更新${d.courseRating != null ? '，球场难度参数已补齐，可到差点中心定向重算受影响球员' : ''}`
+    editDialog.value = false
+    await loadTournaments()
+  } catch (e) { error.value = e.message } finally { savingEdit.value = false }
 }
 
 // ---- 排行榜 ----
@@ -68,7 +94,12 @@ function openTour() { tourForm.value = blankTour(); tourDialog.value = true; err
 async function saveTour() {
   savingTour.value = true; error.value = ''
   try {
-    await api.createTournament({ ...tourForm.value })
+    const d = {
+      ...tourForm.value,
+      courseRating: tourForm.value.courseRating === '' || tourForm.value.courseRating == null ? null : Number(tourForm.value.courseRating),
+      slopeRating: tourForm.value.slopeRating === '' || tourForm.value.slopeRating == null ? null : Number(tourForm.value.slopeRating)
+    }
+    await api.createTournament(d)
     tip.value = `赛事「${tourForm.value.name}」已创建`
     tourDialog.value = false; await loadTournaments()
   } catch (e) { error.value = e.message } finally { savingTour.value = false }
@@ -156,8 +187,15 @@ onMounted(loadAll)
               </template>
             </el-table-column>
             <el-table-column prop="location" label="地点" width="120" />
-            <el-table-column label="操作" width="200" fixed="right">
+            <el-table-column label="难度参数" width="130">
               <template #default="{ row }">
+                <span v-if="row.courseRating != null">{{ row.courseRating }} / {{ row.slopeRating }}</span>
+                <el-tag v-else type="danger" size="small">未维护</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="260" fixed="right">
+              <template #default="{ row }">
+                <el-button size="small" type="primary" plain @click="openEdit(row)">编辑</el-button>
                 <el-button size="small" type="warning" plain :disabled="!canStart(row)" @click="advance(row, '进行中')">开始</el-button>
                 <el-button size="small" type="success" plain :disabled="!canEnd(row)" @click="advance(row, '已结束')">结束</el-button>
               </template>
@@ -234,11 +272,37 @@ onMounted(loadAll)
         <el-form-item label="开始日期"><el-date-picker v-model="tourForm.startDate" type="date" value-format="YYYY-MM-DD" style="width: 100%" /></el-form-item>
         <el-form-item label="结束日期"><el-date-picker v-model="tourForm.endDate" type="date" value-format="YYYY-MM-DD" style="width: 100%" /></el-form-item>
         <el-form-item label="地点"><el-input v-model="tourForm.location" /></el-form-item>
+        <el-form-item label="球场难度值"><el-input v-model="tourForm.courseRating" type="number" step="0.1" placeholder="courseRating，可后补" /></el-form-item>
+        <el-form-item label="坡度难度"><el-input v-model="tourForm.slopeRating" type="number" placeholder="slopeRating 55~155，可后补" /></el-form-item>
         <el-form-item label="备注" class="full"><el-input v-model="tourForm.note" /></el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="tourDialog = false">取消</el-button>
         <el-button type="primary" :loading="savingTour" @click="saveTour">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 编辑赛事（含球场难度参数补齐） -->
+    <el-dialog v-model="editDialog" title="编辑赛事" width="560px">
+      <el-form :model="editForm" label-width="110px" class="dialog-form">
+        <el-form-item label="名称"><el-input v-model="editForm.name" /></el-form-item>
+        <el-form-item label="开始日期"><el-date-picker v-model="editForm.startDate" type="date" value-format="YYYY-MM-DD" style="width: 100%" /></el-form-item>
+        <el-form-item label="结束日期"><el-date-picker v-model="editForm.endDate" type="date" value-format="YYYY-MM-DD" style="width: 100%" /></el-form-item>
+        <el-form-item label="地点"><el-input v-model="editForm.location" /></el-form-item>
+        <el-form-item label="球场难度值">
+          <el-input v-model="editForm.courseRating" type="number" step="0.1" placeholder="courseRating 20.0~80.0" />
+        </el-form-item>
+        <el-form-item label="坡度难度">
+          <el-input v-model="editForm.slopeRating" type="number" placeholder="slopeRating 55~155" />
+        </el-form-item>
+        <el-form-item label="备注" class="full"><el-input v-model="editForm.note" /></el-form-item>
+      </el-form>
+      <div class="muted" style="margin: -6px 0 8px 110px; font-size: 12px">
+        难度参数需成对维护（都填或都留空）；补齐后请到「差点中心 → 缺参与定向重算」重算受影响球员。
+      </div>
+      <template #footer>
+        <el-button @click="editDialog = false">取消</el-button>
+        <el-button type="primary" :loading="savingEdit" @click="saveEdit">保存</el-button>
       </template>
     </el-dialog>
 
